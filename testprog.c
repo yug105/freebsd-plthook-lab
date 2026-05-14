@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <dlfcn.h>
 #include <link.h>
 
 static const char *
@@ -90,6 +91,24 @@ find_object_by_address(const char *label, uintptr_t address)
 }
 
 static void
+find_object_by_symbol(const char *label, const char *symbol)
+{
+	void *address;
+	const char *error;
+
+	(void)dlerror();
+	address = dlsym(RTLD_DEFAULT, symbol);
+	error = dlerror();
+	if (error != NULL) {
+		printf("address search: %s\n", label);
+		printf("  dlsym error: %s\n\n", error);
+		return;
+	}
+
+	find_object_by_address(label, (uintptr_t)address);
+}
+
+static void
 local_function(void)
 {
 	puts("inside local_function");
@@ -144,7 +163,8 @@ int main(void)
 	 * so keep the scan API based on integer process addresses instead.
 	 */
 	find_object_by_address("local_function", (uintptr_t)local_function);
-	find_object_by_address("puts", (uintptr_t)puts);
+	find_object_by_address("puts reference in executable", (uintptr_t)puts);
+	find_object_by_symbol("puts resolved by dlsym", "puts");
 
 	return 0;
 }
