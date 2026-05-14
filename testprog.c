@@ -38,6 +38,12 @@ object_name(const struct dl_phdr_info *info)
 	return name;
 }
 
+static uintptr_t
+object_runtime_address(const struct dl_phdr_info *info, uintptr_t value)
+{
+	return (uintptr_t)info->dlpi_addr + value;
+}
+
 static int
 find_address_callback(struct dl_phdr_info *info, size_t size, void *data)
 {
@@ -153,7 +159,8 @@ dump_plt_relocations_for_object(const struct dl_phdr_info *info,
 			case DT_NULL:
 				goto done_dynamic;
 			case DT_JMPREL:
-				jmprel = (uintptr_t)dyn->d_un.d_ptr;
+				jmprel = object_runtime_address(info,
+				    (uintptr_t)dyn->d_un.d_ptr);
 				break;
 			case DT_PLTRELSZ:
 				pltrelsz = (size_t)dyn->d_un.d_val;
@@ -162,10 +169,12 @@ dump_plt_relocations_for_object(const struct dl_phdr_info *info,
 				pltrel_type = (unsigned long)dyn->d_un.d_val;
 				break;
 			case DT_SYMTAB:
-				symtab_addr = (uintptr_t)dyn->d_un.d_ptr;
+				symtab_addr = object_runtime_address(info,
+				    (uintptr_t)dyn->d_un.d_ptr);
 				break;
 			case DT_STRTAB:
-				strtab_addr = (uintptr_t)dyn->d_un.d_ptr;
+				strtab_addr = object_runtime_address(info,
+				    (uintptr_t)dyn->d_un.d_ptr);
 				break;
 			}
 			dyn++;
