@@ -21,3 +21,4 @@ jobs:
             set -eux
             make
             ./testprog
+            objdump -d testprog | grep -A6 "puts@plt"
