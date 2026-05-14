@@ -1,6 +1,16 @@
 #include <stdio.h>
 #include <link.h>
 
+static const char *
+program_header_type_name(Elf_Word type)
+{
+	if (type == PT_LOAD)
+		return "PT_LOAD";
+	if (type == PT_DYNAMIC)
+		return "PT_DYNAMIC";
+	return "OTHER";
+}
+
 static int
 callback(struct dl_phdr_info *info, size_t size, void *data)
 {
@@ -21,9 +31,12 @@ callback(struct dl_phdr_info *info, size_t size, void *data)
 
 	for (i = 0; i < info->dlpi_phnum; i++) {
 		phdr = &info->dlpi_phdr[i];
+		if (phdr->p_type != PT_LOAD && phdr->p_type != PT_DYNAMIC)
+			continue;
 
-		printf("  phdr[%u]: type=%u vaddr=%p memsz=%zu\n",
+		printf("  phdr[%u]: type=%s(%u) vaddr=%p memsz=%zu\n",
 		    (unsigned int)i,
+		    program_header_type_name(phdr->p_type),
 		    (unsigned int)phdr->p_type,
 		    (void *)phdr->p_vaddr,
 		    (size_t)phdr->p_memsz);
