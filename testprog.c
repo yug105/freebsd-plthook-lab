@@ -3,6 +3,7 @@
 #include <inttypes.h>
 #include <dlfcn.h>
 #include <link.h>
+#include <string.h>
 
 static const char *
 program_header_type_name(Elf_Word type)
@@ -19,6 +20,10 @@ struct find_address_data {
 	uintptr_t address;
 	const char *object_name;
 	Elf_Addr object_base;
+};
+
+struct plt_dump_data {
+	const char *target_symbol;
 };
 
 static const char *
@@ -109,6 +114,140 @@ find_object_by_symbol(const char *label, const char *symbol)
 }
 
 static void
+dump_plt_relocations_for_object(const struct dl_phdr_info *info,
+    const char *target_symbol)
+{
+	const Elf_Phdr *phdr;
+	const Elf_Dyn *dyn;
+	const Elf_Rela *rela;
+	const Elf_Rel *rel;
+	const Elf_Sym *symtab;
+	const char *strtab;
+	uintptr_t jmprel;
+	uintptr_t symtab_addr;
+	uintptr_t strtab_addr;
+	size_t pltrelsz;
+	unsigned long pltrel_type;
+	size_t count;
+	size_t i;
+	const char *sym_name;
+	uintptr_t slot;
+	unsigned int sym_index;
+	int printed_header;
+
+	jmprel = 0;
+	symtab_addr = 0;
+	strtab_addr = 0;
+	pltrelsz = 0;
+	pltrel_type = 0;
+	printed_header = 0;
+
+	for (i = 0; i < info->dlpi_phnum; i++) {
+		phdr = &info->dlpi_phdr[i];
+		if (phdr->p_type != PT_DYNAMIC)
+			continue;
+
+		dyn = (const Elf_Dyn *)(uintptr_t)(info->dlpi_addr + phdr->p_vaddr);
+		for (;;) {
+			switch (dyn->d_tag) {
+			case DT_NULL:
+				goto done_dynamic;
+			case DT_JMPREL:
+				jmprel = (uintptr_t)dyn->d_un.d_ptr;
+				break;
+			case DT_PLTRELSZ:
+				pltrelsz = (size_t)dyn->d_un.d_val;
+				break;
+			case DT_PLTREL:
+				pltrel_type = (unsigned long)dyn->d_un.d_val;
+				break;
+			case DT_SYMTAB:
+				symtab_addr = (uintptr_t)dyn->d_un.d_ptr;
+				break;
+			case DT_STRTAB:
+				strtab_addr = (uintptr_t)dyn->d_un.d_ptr;
+				break;
+			}
+			dyn++;
+		}
+done_dynamic:
+		break;
+	}
+
+	if (jmprel == 0 || symtab_addr == 0 || strtab_addr == 0 || pltrelsz == 0)
+		return;
+
+	symtab = (const Elf_Sym *)symtab_addr;
+	strtab = (const char *)strtab_addr;
+
+	printf("plt relocations: %s\n", object_name(info));
+	printf("  base address: 0x%" PRIxPTR "\n", (uintptr_t)info->dlpi_addr);
+
+	if (pltrel_type == DT_RELA) {
+		rela = (const Elf_Rela *)jmprel;
+		count = pltrelsz / sizeof(*rela);
+		for (i = 0; i < count; i++) {
+			sym_index = ELF_R_SYM(rela[i].r_info);
+			sym_name = strtab + symtab[sym_index].st_name;
+			slot = (uintptr_t)info->dlpi_addr + rela[i].r_offset;
+
+			if (!printed_header) {
+				printf("  format: RELA\n");
+				printed_header = 1;
+			}
+
+			printf("  rel[%zu]: slot=0x%" PRIxPTR " symbol=%s\n",
+			    i, slot, sym_name);
+			if (target_symbol != NULL && strcmp(sym_name, target_symbol) == 0) {
+				printf("    target match: yes\n");
+			}
+		}
+	} else if (pltrel_type == DT_REL) {
+		rel = (const Elf_Rel *)jmprel;
+		count = pltrelsz / sizeof(*rel);
+		for (i = 0; i < count; i++) {
+			sym_index = ELF_R_SYM(rel[i].r_info);
+			sym_name = strtab + symtab[sym_index].st_name;
+			slot = (uintptr_t)info->dlpi_addr + rel[i].r_offset;
+
+			if (!printed_header) {
+				printf("  format: REL\n");
+				printed_header = 1;
+			}
+
+			printf("  rel[%zu]: slot=0x%" PRIxPTR " symbol=%s\n",
+			    i, slot, sym_name);
+			if (target_symbol != NULL && strcmp(sym_name, target_symbol) == 0) {
+				printf("    target match: yes\n");
+			}
+		}
+	}
+
+	printf("\n");
+}
+
+static int
+dump_plt_relocations_callback(struct dl_phdr_info *info, size_t size, void *data)
+{
+	struct plt_dump_data *dump;
+
+	(void)size;
+
+	dump = data;
+	dump_plt_relocations_for_object(info, dump->target_symbol);
+	return 0;
+}
+
+static void
+dump_plt_relocations(const char *target_symbol)
+{
+	struct plt_dump_data dump;
+
+	dump.target_symbol = target_symbol;
+	(void)dl_iterate_phdr(dump_plt_relocations_callback, &dump);
+}
+
+static void
 local_function(void)
 {
 	puts("inside local_function");
@@ -165,6 +304,7 @@ int main(void)
 	find_object_by_address("local_function", (uintptr_t)local_function);
 	find_object_by_address("puts reference in executable", (uintptr_t)puts);
 	find_object_by_symbol("puts resolved by dlsym", "puts");
+	dump_plt_relocations("puts");
 
 	return 0;
 }
