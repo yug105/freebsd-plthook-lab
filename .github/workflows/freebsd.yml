@@ -1,0 +1,23 @@
+name: FreeBSD CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  freebsd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run on FreeBSD
+        uses: cross-platform-actions/action@v0.32.0
+        with:
+          operating_system: freebsd
+          version: "14.2"
+          architecture: x86-64
+          shell: sh
+          run: |
+            set -eux
+            make
+            ./testprog
