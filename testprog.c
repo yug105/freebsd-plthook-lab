@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <link.h>
 
 static const char *
@@ -14,7 +15,7 @@ program_header_type_name(Elf_Word type)
 
 struct find_address_data {
 	const char *label;
-	const void *address;
+	uintptr_t address;
 	const char *object_name;
 	Elf_Addr object_base;
 };
@@ -44,7 +45,7 @@ find_address_callback(struct dl_phdr_info *info, size_t size, void *data)
 	(void)size;
 
 	search = data;
-	target = (uintptr_t)search->address;
+	target = search->address;
 
 	for (i = 0; i < info->dlpi_phnum; i++) {
 		phdr = &info->dlpi_phdr[i];
@@ -65,7 +66,7 @@ find_address_callback(struct dl_phdr_info *info, size_t size, void *data)
 }
 
 static void
-find_object_by_address(const char *label, const void *address)
+find_object_by_address(const char *label, uintptr_t address)
 {
 	struct find_address_data search;
 
@@ -77,10 +78,11 @@ find_object_by_address(const char *label, const void *address)
 	(void)dl_iterate_phdr(find_address_callback, &search);
 
 	printf("address search: %s\n", search.label);
-	printf("  address: %p\n", search.address);
+	printf("  address: 0x%" PRIxPTR "\n", search.address);
 	if (search.object_name != NULL) {
 		printf("  object: %s\n", search.object_name);
-		printf("  base address: %p\n", (void *)search.object_base);
+		printf("  base address: 0x%" PRIxPTR "\n",
+		    (uintptr_t)search.object_base);
 	} else {
 		printf("  object: <not found>\n");
 	}
@@ -103,7 +105,7 @@ callback(struct dl_phdr_info *info, size_t size, void *data)
 	(void)data;
 
 	printf("object name: %s\n", object_name(info));
-	printf("base address: %p\n", (void *)info->dlpi_addr);
+	printf("base address: 0x%" PRIxPTR "\n", (uintptr_t)info->dlpi_addr);
 	printf("program headers: %u\n", (unsigned int)info->dlpi_phnum);
 
 	for (i = 0; i < info->dlpi_phnum; i++) {
@@ -111,11 +113,12 @@ callback(struct dl_phdr_info *info, size_t size, void *data)
 		if (phdr->p_type != PT_LOAD && phdr->p_type != PT_DYNAMIC)
 			continue;
 
-		printf("  phdr[%u]: type=%s(%u) vaddr=%p memsz=%zu\n",
+		printf("  phdr[%u]: type=%s(%u) vaddr=0x%" PRIxPTR
+		    " memsz=%zu\n",
 		    (unsigned int)i,
 		    program_header_type_name(phdr->p_type),
 		    (unsigned int)phdr->p_type,
-		    (void *)phdr->p_vaddr,
+		    (uintptr_t)phdr->p_vaddr,
 		    (size_t)phdr->p_memsz);
 	}
 
@@ -135,8 +138,13 @@ int main(void)
 		return 1;
 	}
 
-	find_object_by_address("local_function", (const void *)&local_function);
-	find_object_by_address("puts", (const void *)&puts);
+	/*
+	 * This is FreeBSD/ELF runtime introspection code. ISO C does not
+	 * define a portable conversion between function pointers and void *,
+	 * so keep the scan API based on integer process addresses instead.
+	 */
+	find_object_by_address("local_function", (uintptr_t)local_function);
+	find_object_by_address("puts", (uintptr_t)puts);
 
 	return 0;
 }
