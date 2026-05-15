@@ -7,6 +7,10 @@ on:
 jobs:
   freebsd:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["12.4", "14.2"]
     steps:
       - uses: actions/checkout@v4
 
@@ -14,7 +18,7 @@ jobs:
         uses: cross-platform-actions/action@v0.32.0
         with:
           operating_system: freebsd
-          version: "14.2"
+          version: ${{ matrix.version }}
           architecture: x86-64
           shell: sh
           run: |
