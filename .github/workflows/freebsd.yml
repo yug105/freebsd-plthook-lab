@@ -28,4 +28,10 @@ jobs:
             cat testprog.out
             grep "hooked puts" testprog.out
             grep "vm map entries:" testprog.out
+            ./claimcheck > claimcheck.out
+            cat claimcheck.out
+            grep "macro check:" claimcheck.out
+            grep "dlopen(NULL) check:" claimcheck.out
+            grep "RTLD_NOLOAD + dlclose link_map check:" claimcheck.out
+            grep "lazy GOT slot vs dlsym check:" claimcheck.out
             objdump -d testprog | grep -A6 "puts@plt"

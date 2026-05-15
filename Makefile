@@ -2,18 +2,25 @@ CC ?= cc
 CFLAGS ?= -Wall -Wextra -g
 LDLIBS ?= -lutil
 
-PROG = testprog
-OBJS = testprog.o
+PROGS = testprog claimcheck
+TESTPROG_OBJS = testprog.o
+CLAIMCHECK_OBJS = claimcheck.o
 
 .PHONY: all clean
 
-all: $(PROG)
+all: $(PROGS)
 
-$(PROG): $(OBJS)
-	$(CC) $(CFLAGS) -o $(PROG) $(OBJS) $(LDLIBS)
+testprog: $(TESTPROG_OBJS)
+	$(CC) $(CFLAGS) -o testprog $(TESTPROG_OBJS) $(LDLIBS)
+
+claimcheck: $(CLAIMCHECK_OBJS)
+	$(CC) $(CFLAGS) -o claimcheck $(CLAIMCHECK_OBJS) $(LDLIBS)
 
 testprog.o: testprog.c
 	$(CC) $(CFLAGS) -c testprog.c
 
+claimcheck.o: claimcheck.c
+	$(CC) $(CFLAGS) -c claimcheck.c
+
 clean:
-	rm -f $(PROG) $(OBJS)
+	rm -f $(PROGS) $(TESTPROG_OBJS) $(CLAIMCHECK_OBJS)
