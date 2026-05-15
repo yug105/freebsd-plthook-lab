@@ -24,5 +24,8 @@ jobs:
           run: |
             set -eux
             make
-            ./testprog
+            ./testprog > testprog.out
+            cat testprog.out
+            grep "hooked puts" testprog.out
+            grep "vm map entries:" testprog.out
             objdump -d testprog | grep -A6 "puts@plt"

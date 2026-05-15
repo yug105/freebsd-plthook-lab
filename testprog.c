@@ -1,9 +1,15 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/user.h>
 #include <dlfcn.h>
+#include <libutil.h>
 #include <link.h>
 #include <string.h>
+#include <unistd.h>
 
 static const char *
 program_header_type_name(Elf_Word type)
@@ -25,6 +31,123 @@ struct find_address_data {
 struct plt_dump_data {
 	const char *target_symbol;
 };
+
+struct plt_hook_data {
+	const char *target_symbol;
+	uintptr_t replacement;
+	uintptr_t original;
+	uintptr_t slot;
+	const char *object_name;
+	int saw_first_object;
+	int patched;
+};
+
+typedef int (*puts_function)(const char *);
+
+static uintptr_t original_puts;
+
+static int
+hooked_puts(const char *s)
+{
+	puts_function real_puts;
+
+	real_puts = (puts_function)original_puts;
+	if (real_puts == NULL)
+		return EOF;
+
+	(void)real_puts("[hooked puts]");
+	return real_puts(s);
+}
+
+static const char *
+vm_entry_type_name(int type)
+{
+	switch (type) {
+	case KVME_TYPE_NONE:
+		return "none";
+	case KVME_TYPE_DEFAULT:
+		return "default";
+	case KVME_TYPE_VNODE:
+		return "vnode";
+	case KVME_TYPE_SWAP:
+		return "swap";
+	case KVME_TYPE_DEVICE:
+		return "device";
+	case KVME_TYPE_PHYS:
+		return "phys";
+	case KVME_TYPE_DEAD:
+		return "dead";
+#ifdef KVME_TYPE_SG
+	case KVME_TYPE_SG:
+		return "sg";
+#endif
+#ifdef KVME_TYPE_MGTDEVICE
+	case KVME_TYPE_MGTDEVICE:
+		return "mgtdevice";
+#endif
+#ifdef KVME_TYPE_GUARD
+	case KVME_TYPE_GUARD:
+		return "guard";
+#endif
+	case KVME_TYPE_UNKNOWN:
+		return "unknown";
+	default:
+		return "other";
+	}
+}
+
+static void
+vm_protection_string(int protection, char out[4])
+{
+	out[0] = (protection & KVME_PROT_READ) != 0 ? 'r' : '-';
+	out[1] = (protection & KVME_PROT_WRITE) != 0 ? 'w' : '-';
+	out[2] = (protection & KVME_PROT_EXEC) != 0 ? 'x' : '-';
+	out[3] = '\0';
+}
+
+static int
+vm_protection_to_mprotect(int protection)
+{
+	int result;
+
+	result = 0;
+	if ((protection & KVME_PROT_READ) != 0)
+		result |= PROT_READ;
+	if ((protection & KVME_PROT_WRITE) != 0)
+		result |= PROT_WRITE;
+	if ((protection & KVME_PROT_EXEC) != 0)
+		result |= PROT_EXEC;
+
+	return result;
+}
+
+static int
+find_vm_protection(uintptr_t address, int *protection)
+{
+	struct kinfo_vmentry *map;
+	int count;
+	int i;
+
+	count = 0;
+	map = kinfo_getvmmap(getpid(), &count);
+	if (map == NULL) {
+		perror("kinfo_getvmmap");
+		return -1;
+	}
+
+	for (i = 0; i < count; i++) {
+		if (address >= (uintptr_t)map[i].kve_start &&
+		    address < (uintptr_t)map[i].kve_end) {
+			*protection = vm_protection_to_mprotect(
+			    map[i].kve_protection);
+			free(map);
+			return 0;
+		}
+	}
+
+	free(map);
+	return -1;
+}
 
 static const char *
 object_name(const struct dl_phdr_info *info)
@@ -256,6 +379,235 @@ dump_plt_relocations(const char *target_symbol)
 	(void)dl_iterate_phdr(dump_plt_relocations_callback, &dump);
 }
 
+static int
+patch_got_slot(uintptr_t slot, uintptr_t replacement, uintptr_t *original)
+{
+	long pagesize;
+	uintptr_t page;
+	int old_protection;
+
+	pagesize = sysconf(_SC_PAGESIZE);
+	if (pagesize <= 0) {
+		perror("sysconf");
+		return -1;
+	}
+
+	page = slot & ~((uintptr_t)pagesize - 1);
+	if (find_vm_protection(slot, &old_protection) != 0) {
+		fprintf(stderr, "could not find VM protection for slot 0x%" PRIxPTR
+		    "\n", slot);
+		return -1;
+	}
+
+	*original = *(uintptr_t *)slot;
+
+	if (mprotect((void *)page, (size_t)pagesize,
+	    old_protection | PROT_WRITE) != 0) {
+		perror("mprotect writable");
+		return -1;
+	}
+
+	*(uintptr_t *)slot = replacement;
+
+	if (mprotect((void *)page, (size_t)pagesize, old_protection) != 0) {
+		perror("mprotect restore");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int
+hook_plt_symbol_in_object(const struct dl_phdr_info *info,
+    struct plt_hook_data *hook)
+{
+	const Elf_Phdr *phdr;
+	const Elf_Dyn *dyn;
+	const Elf_Rela *rela;
+	const Elf_Rel *rel;
+	const Elf_Sym *symtab;
+	const char *strtab;
+	uintptr_t jmprel;
+	uintptr_t symtab_addr;
+	uintptr_t strtab_addr;
+	size_t pltrelsz;
+	unsigned long pltrel_type;
+	size_t count;
+	size_t i;
+	const char *sym_name;
+	uintptr_t slot;
+	unsigned int sym_index;
+
+	jmprel = 0;
+	symtab_addr = 0;
+	strtab_addr = 0;
+	pltrelsz = 0;
+	pltrel_type = 0;
+
+	for (i = 0; i < info->dlpi_phnum; i++) {
+		phdr = &info->dlpi_phdr[i];
+		if (phdr->p_type != PT_DYNAMIC)
+			continue;
+
+		dyn = (const Elf_Dyn *)(uintptr_t)(info->dlpi_addr + phdr->p_vaddr);
+		for (;;) {
+			switch (dyn->d_tag) {
+			case DT_NULL:
+				goto done_dynamic;
+			case DT_JMPREL:
+				jmprel = object_runtime_address(info,
+				    (uintptr_t)dyn->d_un.d_ptr);
+				break;
+			case DT_PLTRELSZ:
+				pltrelsz = (size_t)dyn->d_un.d_val;
+				break;
+			case DT_PLTREL:
+				pltrel_type = (unsigned long)dyn->d_un.d_val;
+				break;
+			case DT_SYMTAB:
+				symtab_addr = object_runtime_address(info,
+				    (uintptr_t)dyn->d_un.d_ptr);
+				break;
+			case DT_STRTAB:
+				strtab_addr = object_runtime_address(info,
+				    (uintptr_t)dyn->d_un.d_ptr);
+				break;
+			}
+			dyn++;
+		}
+done_dynamic:
+		break;
+	}
+
+	if (jmprel == 0 || symtab_addr == 0 || strtab_addr == 0 || pltrelsz == 0)
+		return 0;
+
+	symtab = (const Elf_Sym *)symtab_addr;
+	strtab = (const char *)strtab_addr;
+
+	if (pltrel_type == DT_RELA) {
+		rela = (const Elf_Rela *)jmprel;
+		count = pltrelsz / sizeof(*rela);
+		for (i = 0; i < count; i++) {
+			sym_index = ELF_R_SYM(rela[i].r_info);
+			sym_name = strtab + symtab[sym_index].st_name;
+			if (strcmp(sym_name, hook->target_symbol) != 0)
+				continue;
+
+			slot = (uintptr_t)info->dlpi_addr + rela[i].r_offset;
+			if (patch_got_slot(slot, hook->replacement,
+			    &hook->original) != 0)
+				return -1;
+			hook->slot = slot;
+			hook->object_name = object_name(info);
+			hook->patched = 1;
+			return 1;
+		}
+	} else if (pltrel_type == DT_REL) {
+		rel = (const Elf_Rel *)jmprel;
+		count = pltrelsz / sizeof(*rel);
+		for (i = 0; i < count; i++) {
+			sym_index = ELF_R_SYM(rel[i].r_info);
+			sym_name = strtab + symtab[sym_index].st_name;
+			if (strcmp(sym_name, hook->target_symbol) != 0)
+				continue;
+
+			slot = (uintptr_t)info->dlpi_addr + rel[i].r_offset;
+			if (patch_got_slot(slot, hook->replacement,
+			    &hook->original) != 0)
+				return -1;
+			hook->slot = slot;
+			hook->object_name = object_name(info);
+			hook->patched = 1;
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+static int
+hook_plt_symbol_callback(struct dl_phdr_info *info, size_t size, void *data)
+{
+	struct plt_hook_data *hook;
+	int result;
+
+	(void)size;
+
+	hook = data;
+	if (hook->saw_first_object)
+		return 1;
+	hook->saw_first_object = 1;
+
+	result = hook_plt_symbol_in_object(info, hook);
+	if (result < 0)
+		return 1;
+
+	return result != 0 ? 1 : 0;
+}
+
+static int
+hook_plt_symbol_in_main(const char *target_symbol, uintptr_t replacement,
+    uintptr_t *original)
+{
+	struct plt_hook_data hook;
+
+	hook.target_symbol = target_symbol;
+	hook.replacement = replacement;
+	hook.original = 0;
+	hook.slot = 0;
+	hook.object_name = NULL;
+	hook.saw_first_object = 0;
+	hook.patched = 0;
+
+	(void)dl_iterate_phdr(hook_plt_symbol_callback, &hook);
+	if (!hook.patched)
+		return -1;
+
+	*original = hook.original;
+	printf("hooked %s in %s\n", target_symbol, hook.object_name);
+	printf("  slot: 0x%" PRIxPTR "\n", hook.slot);
+	printf("  original target: 0x%" PRIxPTR "\n", hook.original);
+	printf("  replacement target: 0x%" PRIxPTR "\n\n", hook.replacement);
+
+	return 0;
+}
+
+static void
+dump_vmmap(void)
+{
+	struct kinfo_vmentry *map;
+	char prot[4];
+	const char *path;
+	int count;
+	int i;
+
+	count = 0;
+	map = kinfo_getvmmap(getpid(), &count);
+	if (map == NULL) {
+		perror("kinfo_getvmmap");
+		return;
+	}
+
+	printf("vm map entries: %d\n", count);
+	for (i = 0; i < count; i++) {
+		vm_protection_string(map[i].kve_protection, prot);
+		path = map[i].kve_path[0] != '\0' ? map[i].kve_path : "-";
+
+		printf("  vm[%d]: start=0x%" PRIxMAX " end=0x%" PRIxMAX
+		    " prot=%s type=%s path=%s\n",
+		    i,
+		    (uintmax_t)map[i].kve_start,
+		    (uintmax_t)map[i].kve_end,
+		    prot,
+		    vm_entry_type_name(map[i].kve_type),
+		    path);
+	}
+	printf("\n");
+
+	free(map);
+}
+
 static void
 local_function(void)
 {
@@ -314,6 +666,11 @@ int main(void)
 	find_object_by_address("puts reference in executable", (uintptr_t)puts);
 	find_object_by_symbol("puts resolved by dlsym", "puts");
 	dump_plt_relocations("puts");
+	if (hook_plt_symbol_in_main("puts", (uintptr_t)hooked_puts,
+	    &original_puts) == 0) {
+		puts("this call goes through the patched puts slot");
+	}
+	dump_vmmap();
 
 	return 0;
 }
