@@ -418,6 +418,38 @@ patch_got_slot(uintptr_t slot, uintptr_t replacement, uintptr_t *original)
 }
 
 static int
+check_rela_symbol(const struct dl_phdr_info *info, const Elf_Rela *rela,
+    const Elf_Sym *symtab, const char *strtab,
+    const struct plt_hook_data *hook, uintptr_t *slot_out)
+{
+	const char *sym_name;
+	uintptr_t slot;
+	unsigned int sym_index;
+	Elf_Word name_offset;
+
+	sym_index = ELF_R_SYM(rela->r_info);
+	name_offset = symtab[sym_index].st_name;
+	sym_name = strtab + name_offset;
+
+	printf("    check rela: sym_index=%u name_offset=%u"
+	    " r_offset=0x%" PRIxPTR " symbol=%s target=%s\n",
+	    sym_index, (unsigned int)name_offset,
+	    (uintptr_t)rela->r_offset, sym_name, hook->target_symbol);
+
+	if (strcmp(sym_name, hook->target_symbol) != 0) {
+		printf("    check rela: no match\n");
+		return 0;
+	}
+
+	slot = (uintptr_t)info->dlpi_addr + rela->r_offset;
+	printf("    check rela: MATCH slot=0x%" PRIxPTR "\n", slot);
+	printf("    check rela: current slot value=0x%" PRIxPTR "\n",
+	    *(uintptr_t *)slot);
+
+	*slot_out = slot;
+	return 1;
+}
+static int
 hook_plt_symbol_in_object(const struct dl_phdr_info *info,
     struct plt_hook_data *hook)
 {
@@ -437,6 +469,7 @@ hook_plt_symbol_in_object(const struct dl_phdr_info *info,
 	const char *sym_name;
 	uintptr_t slot;
 	unsigned int sym_index;
+	int result;
 
 	jmprel = 0;
 	symtab_addr = 0;
@@ -489,12 +522,13 @@ done_dynamic:
 		rela = (const Elf_Rela *)jmprel;
 		count = pltrelsz / sizeof(*rela);
 		for (i = 0; i < count; i++) {
-			sym_index = ELF_R_SYM(rela[i].r_info);
-			sym_name = strtab + symtab[sym_index].st_name;
-			if (strcmp(sym_name, hook->target_symbol) != 0)
+			result = check_rela_symbol(info, &rela[i], symtab,
+			    strtab, hook, &slot);
+			if (result < 0)
+				return -1;
+			if (result == 0)
 				continue;
 
-			slot = (uintptr_t)info->dlpi_addr + rela[i].r_offset;
 			if (patch_got_slot(slot, hook->replacement,
 			    &hook->original) != 0)
 				return -1;
